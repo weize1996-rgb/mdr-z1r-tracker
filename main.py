@@ -2,7 +2,7 @@ from sources.shopee import search_shopee
 from filter import is_valid, is_used, seen_before
 from notify import send_line
 
-TARGET = 30000
+TARGET = 999999
 
 def run():
     items = search_shopee()
