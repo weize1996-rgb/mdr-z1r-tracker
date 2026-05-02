@@ -3,7 +3,7 @@ from filter import is_valid, is_used, seen_before
 from notify import send_line
 from ai_engine import update, score, is_scam, avg
 
-TARGET = 50000
+TARGET = 90000
 
 def run():
     items = search_shopee()
