@@ -1,159 +1,142 @@
-from flask import Flask
 import requests
-import time
+import statistics
 import os
+from flask import Flask
 import redis
-from apscheduler.schedulers.background import BackgroundScheduler
+import hashlib
 
 app = Flask(__name__)
 
-# ====== 環境變數 ======
-LINE_TOKEN = os.getenv("LINE_TOKEN")
+# ===== Redis（Upstash）=====
 REDIS_URL = os.getenv("REDIS_URL")
-
-if not LINE_TOKEN:
-    raise Exception("❌ LINE_TOKEN 沒設定")
-
-if not REDIS_URL:
-    raise Exception("❌ REDIS_URL 沒設定")
-
-# ====== Redis ======
 r = redis.from_url(REDIS_URL, decode_responses=True)
 
-# ====== 參數 ======
-COOLDOWN = 60 * 60 * 6       # 6小時
-DROP_RATIO = 0.95           # 低於95%才通知
+# ===== LINE =====
+LINE_TOKEN = os.getenv("LINE_TOKEN")
 
-# ====== LINE 發送 ======
+# ===== 發送 LINE =====
 def send_line(msg):
-    url = "https://api.line.me/v2/bot/message/broadcast"
+    print("🔥 sending LINE:", msg)
     headers = {
-        "Authorization": f"Bearer {LINE_TOKEN}",
-        "Content-Type": "application/json"
+        "Authorization": f"Bearer {LINE_TOKEN}"
     }
-    data = {
-        "messages": [{"type": "text", "text": msg}]
-    }
+    data = {"message": msg}
+    res = requests.post(
+        "https://notify-api.line.me/api/notify",
+        headers=headers,
+        data=data
+    )
+    print("LINE status:", res.status_code, res.text)
 
+# ===== 去重（防重複通知）=====
+def is_sent(item_id):
+    return r.get(item_id)
+
+def mark_sent(item_id):
+    r.setex(item_id, 86400, "1")  # 1天不重複
+
+def hash_item(name, price):
+    return hashlib.md5(f"{name}{price}".encode()).hexdigest()
+
+# ===== Shopee =====
+def get_shopee():
     try:
-        res = requests.post(url, headers=headers, json=data, timeout=10)
-        print("📨 LINE:", res.status_code, res.text)
-    except Exception as e:
-        print("❌ LINE 發送錯誤:", e)
+        # ⚠️ 這裡先留空（避免被 ban）
+        return []
+    except:
+        return []
 
+# ===== Ruten =====
+def get_ruten():
+    try:
+        return []
+    except:
+        return []
 
-# ====== 爬蟲（你之後填實作） ======
-def fetch_shopee():
-    print("🟠 Shopee items: 0")
-    return []
+# ===== Yahoo =====
+def get_yahoo():
+    try:
+        return []
+    except:
+        return []
 
-def fetch_yahoo():
-    print("🟡 Yahoo items: 0")
-    return []
+# ===== fallback =====
+def fallback():
+    return [{
+        "name": "Sony MDR-Z1R",
+        "price": 29000,
+        "condition": "新品",
+        "url": "https://example.com"
+    }]
 
-def fetch_ruten():
-    print("🔵 Ruten items: 0")
-    return []
+# ===== 主邏輯 =====
+def run():
+    print("🔥 run() START")
 
-
-def fetch_all():
     items = []
-    items += fetch_shopee()
-    items += fetch_yahoo()
-    items += fetch_ruten()
+
+    shopee = get_shopee()
+    print("Shopee items:", len(shopee))
+    items += shopee
+
+    ruten = get_ruten()
+    print("Ruten items:", len(ruten))
+    items += ruten
+
+    yahoo = get_yahoo()
+    print("Yahoo items:", len(yahoo))
+    items += yahoo
 
     if not items:
         print("⚠️ 全平台沒資料，啟用 fallback")
-        items = [{
-            "id": "sony-z1r",
-            "title": "Sony MDR-Z1R 測試商品",
-            "price": 29000,
-            "url": "https://example.com"
-        }]
+        items = fallback()
 
-    print(f"📦 總商品數: {len(items)}")
-    return items
+    print("📦 總商品數:", len(items))
 
+    prices = [i["price"] for i in items if i["price"] > 0]
 
-# ====== 通知判斷 ======
-def should_notify(item):
-    key = f"item:{item['id']}"
-    now = int(time.time())
+    if not prices:
+        print("❌ 沒有有效價格")
+        return
 
-    last_time = r.get(f"{key}:time")
-    last_price = r.get(f"{key}:price")
+    avg_price = statistics.mean(prices)
 
-    # ===== 冷卻 =====
-    if last_time:
-        if now - int(last_time) < COOLDOWN:
-            print("⏳ 冷卻中:", item["title"])
-            return False
+    for item in items:
+        name = item["name"]
+        price = item["price"]
+        url = item["url"]
+        cond = item.get("condition", "未知")
 
-    # ===== 價格判斷 =====
-    if last_price:
-        last_price = int(last_price)
-        if item["price"] >= last_price * DROP_RATIO:
-            print("💤 沒有明顯降價:", item["title"])
-            return False
+        item_id = hash_item(name, price)
 
-    return True
+        print("👉", name, price)
 
+        if is_sent(item_id):
+            print("⏩ 已發過，跳過")
+            continue
 
-def mark_sent(item):
-    key = f"item:{item['id']}"
-    now = int(time.time())
+        score = (avg_price - price) / avg_price * 100
 
-    r.set(f"{key}:time", now)
-    r.set(f"{key}:price", item["price"])
+        if score > 20:
+            msg = f"""
+🔥 AI撿到好價！
+💰 {price}（市場約 {int(avg_price)}）
+📊 便宜 {score:.1f}%
+📦 {cond}
+📝 {name}
+🔗 {url}
+"""
+            send_line(msg)
+            mark_sent(item_id)
+            print("✅ 發送:", name)
+        else:
+            print("❌ 不符合條件")
 
+    print("🏁 run() END")
 
-# ====== 主任務 ======
-def run_job():
-    print("\n🔥 JOB START")
-
-    try:
-        items = fetch_all()
-
-        for item in items:
-            print(f"👉 檢查商品: {item['title']} {item['price']}")
-
-            if should_notify(item):
-                msg = f"""🔥 AI撿到好價！
-💰 {item['price']}
-📝 {item['title']}
-🔗 {item['url']}"""
-
-                send_line(msg)
-                mark_sent(item)
-                print("✅ 發送成功")
-
-            else:
-                print("❌ 略過")
-
-    except Exception as e:
-        print("❌ JOB ERROR:", e)
-
-    print("🏁 JOB END\n")
-
-
-# ====== Scheduler（重點）=====
-scheduler = BackgroundScheduler()
-scheduler.add_job(run_job, "interval", minutes=10)  # 每10分鐘跑一次
-scheduler.start()
-
-
-# ====== API ======
+# ===== 路由 =====
 @app.route("/")
 def home():
+    print("🔥 ROUTE HIT")
+    run()
     return "OK"
-
-
-@app.route("/run")
-def manual_run():
-    run_job()
-    return "Triggered"
-
-
-# ====== Render 啟動用 ======
-if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=10000)
