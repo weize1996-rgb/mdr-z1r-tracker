@@ -25,7 +25,7 @@ if not LINE_USER_ID:
 # ===== Redis =====
 r = redis.from_url(REDIS_URL, decode_responses=True)
 
-# ===== LINE =====
+# ===== LINE 推播 =====
 def send_line(msg):
     url = "https://api.line.me/v2/bot/message/push"
 
@@ -47,18 +47,15 @@ def send_line(msg):
 
 
 # =========================
-# 🟠 Shopee API
+# 🟠 Shopee
 # =========================
 def fetch_shopee():
     print("🟠 Shopee")
 
     url = "https://shopee.tw/api/v4/search/search_items"
-
     params = {
-        "by": "relevancy",
         "keyword": "sony mdr z1r",
-        "limit": 5,
-        "newest": 0
+        "limit": 5
     }
 
     headers = {"User-Agent": "Mozilla/5.0"}
@@ -66,19 +63,18 @@ def fetch_shopee():
     items = []
 
     try:
-        res = requests.get(url, params=params, headers=headers)
+        res = requests.get(url, params=params, headers=headers, timeout=10)
         data = res.json()
 
         for item in data.get("items", []):
-            info = item["item_basic"]
-
-            price = int(info["price"] / 100000)
+            info = item.get("item_basic", {})
+            price = int(info.get("price", 0) / 100000)
 
             items.append({
-                "id": f"shopee-{info['itemid']}",
-                "title": info["name"],
+                "id": f"shopee-{info.get('itemid')}",
+                "title": info.get("name"),
                 "price": price,
-                "url": f"https://shopee.tw/product/{info['shopid']}/{info['itemid']}"
+                "url": f"https://shopee.tw/product/{info.get('shopid')}/{info.get('itemid')}"
             })
 
     except Exception as e:
@@ -88,31 +84,28 @@ def fetch_shopee():
 
 
 # =========================
-# 🟡 Yahoo API
+# 🟡 Yahoo（較不穩）
 # =========================
 def fetch_yahoo():
     print("🟡 Yahoo")
 
     url = "https://tw.buy.yahoo.com/api/v1/search"
-
-    params = {
-        "p": "sony mdr z1r"
-    }
+    params = {"p": "sony mdr z1r"}
 
     headers = {"User-Agent": "Mozilla/5.0"}
 
     items = []
 
     try:
-        res = requests.get(url, params=params, headers=headers)
+        res = requests.get(url, params=params, headers=headers, timeout=10)
         data = res.json()
 
-        for product in data.get("data", [])[:5]:
+        for p in data.get("data", [])[:5]:
             items.append({
-                "id": f"yahoo-{product['id']}",
-                "title": product["name"],
-                "price": int(product["price"]),
-                "url": product["url"]
+                "id": f"yahoo-{p.get('id')}",
+                "title": p.get("name"),
+                "price": int(p.get("price", 0)),
+                "url": p.get("url")
             })
 
     except Exception as e:
@@ -122,27 +115,26 @@ def fetch_yahoo():
 
 
 # =========================
-# 🔵 露天 HTML 爬蟲
+# 🔵 露天（HTML）
 # =========================
 def fetch_ruten():
     print("🔵 Ruten")
 
     url = "https://www.ruten.com.tw/find/?q=sony+mdr+z1r"
-
     headers = {"User-Agent": "Mozilla/5.0"}
 
     items = []
 
     try:
-        res = requests.get(url, headers=headers)
+        res = requests.get(url, headers=headers, timeout=10)
         soup = BeautifulSoup(res.text, "html.parser")
 
-        products = soup.select(".rt-product-card")[:5]
+        cards = soup.select(".rt-product-card")[:5]
 
-        for p in products:
-            title = p.select_one(".rt-product-card-name")
-            price = p.select_one(".rt-product-card-price")
-            link = p.select_one("a")
+        for c in cards:
+            title = c.select_one(".rt-product-card-name")
+            price = c.select_one(".rt-product-card-price")
+            link = c.select_one("a")
 
             if not title or not price or not link:
                 continue
@@ -210,32 +202,43 @@ def mark_sent(item):
 def job():
     print("🔥 JOB START")
 
-    items = fetch_all()
+    try:
+        items = fetch_all()
 
-    for item in items:
-        print("👉", item["title"], item["price"])
+        for item in items:
+            print("👉", item["title"], item["price"])
 
-        if should_notify(item):
-            msg = f"""🔥 撿到便宜！
+            if should_notify(item):
+                msg = f"""🔥 撿到便宜！
 💰 {item['price']}
 📝 {item['title']}
 🔗 {item['url']}"""
 
-            send_line(msg)
-            mark_sent(item)
+                send_line(msg)
+                mark_sent(item)
+                print("✅ 發送")
+
+    except Exception as e:
+        print("❌ JOB ERROR:", e)
 
     print("🏁 JOB END\n")
 
 
 # =========================
-# Scheduler
+# Scheduler（防爆版）
 # =========================
 scheduler = BackgroundScheduler()
 
 def start_scheduler():
-    scheduler.add_job(job, "interval", minutes=10)
-    scheduler.start()
-    print("⏰ Scheduler started")
+    if not scheduler.running:
+        scheduler.add_job(job, "interval", minutes=10)
+        scheduler.start()
+        print("⏰ Scheduler started")
+
+
+# 👉 關鍵：讓 gunicorn 也會啟動 scheduler（但只跑一次）
+if os.environ.get("RUN_MAIN") != "true":
+    start_scheduler()
 
 
 # =========================
@@ -252,10 +255,8 @@ def test():
 
 
 # =========================
-# 啟動
+# 本地啟動
 # =========================
 if __name__ == "__main__":
-    start_scheduler()
-
     port = int(os.environ.get("PORT", 10000))
     app.run(host="0.0.0.0", port=port)
