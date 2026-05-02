@@ -13,7 +13,9 @@ REDIS_URL = os.environ.get("REDIS_URL")
 if not REDIS_URL:
     raise Exception("❌ REDIS_URL 沒設定")
 
-r = redis.from_url(REDIS_URL)
+import os
+
+r = redis.from_url(os.environ.get("REDIS_URL"))
 
 # ===== LINE =====
 LINE_TOKEN = os.environ.get("LINE_TOKEN")
