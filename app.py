@@ -20,7 +20,7 @@ if not LINE_TOKEN:
 # ===== Redis =====
 r = redis.from_url(REDIS_URL, decode_responses=True)
 
-# ===== LINE 推播 =====
+# ===== LINE =====
 def send_line(msg):
     url = "https://api.line.me/v2/bot/message/broadcast"
     headers = {
@@ -31,52 +31,48 @@ def send_line(msg):
         "messages": [{"type": "text", "text": msg}]
     }
 
-    try:
-        res = requests.post(url, headers=headers, json=data)
-        print("📨 LINE:", res.status_code, res.text)
-    except Exception as e:
-        print("❌ LINE 發送錯誤:", e)
+    res = requests.post(url, headers=headers, json=data)
+    print("📨 LINE:", res.status_code, res.text)
 
-# ===== 爬蟲（先用假資料）=====
+# ===== 模擬爬蟲（之後可換真的）=====
 def fetch_all():
-    print("⚠️ 使用 fallback 測試資料")
-    return [{
-        "id": "sony-z1r",
-        "title": "Sony MDR-Z1R",
-        "price": 29000,
-        "url": "https://example.com"
-    }]
+    return [
+        {
+            "id": "sony-z1r",
+            "title": "Sony MDR-Z1R",
+            "price": 29000,
+            "url": "https://example.com"
+        }
+    ]
 
-# ===== 判斷邏輯 =====
-COOLDOWN = 60 * 60 * 6  # 6小時
-DROP_RATIO = 0.95
+# ===== 邏輯 =====
+DROP_RATIO = 0.95  # 降5%
 
 def should_notify(item):
     key = f"item:{item['id']}"
-    now = int(time.time())
 
-    last_time = r.get(f"{key}:time")
     last_price = r.get(f"{key}:price")
 
-    if last_time:
-        if now - int(last_time) < COOLDOWN:
-            print("⏳ 冷卻中")
-            return False
+    # 🆕 新商品（沒紀錄）
+    if not last_price:
+        print("🆕 新商品")
+        return True, "new"
 
-    if last_price:
-        last_price = int(last_price)
-        if item["price"] >= last_price * DROP_RATIO:
-            print("💤 沒降價")
-            return False
+    last_price = int(last_price)
 
-    return True
+    # 📉 降價
+    if item["price"] < last_price * DROP_RATIO:
+        print("📉 有降價")
+        return True, "drop"
 
-def mark_sent(item):
+    print("💤 無變化")
+    return False, None
+
+
+def mark_item(item):
     key = f"item:{item['id']}"
-    now = int(time.time())
-
-    r.set(f"{key}:time", now)
     r.set(f"{key}:price", item["price"])
+
 
 # ===== 主任務 =====
 def job():
@@ -88,14 +84,23 @@ def job():
         for item in items:
             print("👉", item["title"], item["price"])
 
-            if should_notify(item):
-                msg = f"""🔥 AI撿到好價！
+            notify, reason = should_notify(item)
+
+            if notify:
+                if reason == "new":
+                    tag = "🆕 新上架"
+                elif reason == "drop":
+                    tag = "📉 降價"
+                else:
+                    tag = ""
+
+                msg = f"""{tag}
 💰 {item['price']}
 📝 {item['title']}
 🔗 {item['url']}"""
 
                 send_line(msg)
-                mark_sent(item)
+                mark_item(item)
                 print("✅ 已發送")
             else:
                 print("❌ 略過")
@@ -105,7 +110,8 @@ def job():
 
     print("🏁 JOB END\n")
 
-# ===== Scheduler（避免重複啟動）=====
+
+# ===== Scheduler =====
 scheduler = BackgroundScheduler()
 
 def start_scheduler():
@@ -114,14 +120,27 @@ def start_scheduler():
         scheduler.start()
         print("⏰ Scheduler started")
 
+
 # ===== API =====
 @app.route("/")
 def home():
     return "✅ running"
 
-# ===== Render 啟動 =====
+# 手動測試
+@app.route("/test")
+def test():
+    send_line("🚀 測試通知")
+    return "sent"
+
+# 清空 Redis（重置狀態）
+@app.route("/reset")
+def reset():
+    r.flushall()
+    return "redis cleared"
+
+
+# ===== 啟動 =====
 if __name__ == "__main__":
     start_scheduler()
-
     port = int(os.environ.get("PORT", 10000))
     app.run(host="0.0.0.0", port=port)
