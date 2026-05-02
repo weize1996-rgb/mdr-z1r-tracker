@@ -3,4 +3,5 @@ requests
 redis
 apscheduler
 gunicorn
+beautifulsoup4
 gunicorn==21.2.0
