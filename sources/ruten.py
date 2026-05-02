@@ -1,18 +1,26 @@
-import requests, re
+import requests
+import re
 
 def search_ruten():
-    url = "https://www.ruten.com.tw/find/?q=sony+mdr+z1r"
-    html = requests.get(url).text
+    url = "https://www.ruten.com.tw/find/?q=sony%20mdr%20z1r"
+    headers = {
+        "User-Agent": "Mozilla/5.0"
+    }
+
+    html = requests.get(url, headers=headers, timeout=10).text
+
+    titles = re.findall(r'"name":"([^"]+)"', html)
+    prices = re.findall(r'"price":"(\d+)"', html)
 
     items = []
 
-    # 簡單抓標題（示意用，夠用就好）
-    for m in re.findall(r'data-name="([^"]+)"', html)[:20]:
+    for i in range(min(len(titles), len(prices), 20)):
         items.append({
-            "id": f"ruten_{hash(m)}",
-            "title": m,
-            "price": 999999,  # 露天這版先不抓價格（避免被擋）
+            "id": f"ruten_{i}_{hash(titles[i])}",
+            "title": titles[i],
+            "price": int(prices[i]),
             "url": url
         })
 
+    print("Ruten items:", len(items))
     return items
