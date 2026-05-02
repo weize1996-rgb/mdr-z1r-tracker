@@ -5,5 +5,9 @@ app = Flask(__name__)
 
 @app.route("/")
 def home():
-    run()   # 🔥 這行是關鍵
+    print("🔥 ROUTE HIT")
+    try:
+        run()
+    except Exception as e:
+        print("❌ ERROR:", e)
     return "OK"
