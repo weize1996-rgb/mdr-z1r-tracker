@@ -13,68 +13,72 @@ REDIS_URL = os.environ.get("REDIS_URL")
 LINE_TOKEN = os.environ.get("LINE_TOKEN")
 LINE_USER_ID = os.environ.get("LINE_USER_ID")
 
-if not REDIS_URL:
-    raise Exception("❌ REDIS_URL 沒設定")
-
-if not LINE_TOKEN:
-    raise Exception("❌ LINE_TOKEN 沒設定")
-
-if not LINE_USER_ID:
-    raise Exception("❌ LINE_USER_ID 沒設定")
+print("LINE_USER_ID =", LINE_USER_ID)
 
 # ===== Redis =====
-r = redis.from_url(REDIS_URL, decode_responses=True)
+r = None
+if REDIS_URL:
+    r = redis.from_url(REDIS_URL, decode_responses=True)
+else:
+    print("⚠️ 沒設定 REDIS_URL（將無法記錄價格）")
 
-# ===== LINE 推播 =====
+# ===== LINE 推播（自動 fallback）=====
 def send_line(msg):
-    url = "https://api.line.me/v2/bot/message/push"
+    if not LINE_TOKEN:
+        print("❌ LINE_TOKEN 沒設定")
+        return
+
+    if LINE_USER_ID:
+        url = "https://api.line.me/v2/bot/message/push"
+        data = {
+            "to": LINE_USER_ID,
+            "messages": [{"type": "text", "text": msg}]
+        }
+    else:
+        url = "https://api.line.me/v2/bot/message/broadcast"
+        data = {
+            "messages": [{"type": "text", "text": msg}]
+        }
 
     headers = {
         "Authorization": f"Bearer {LINE_TOKEN}",
         "Content-Type": "application/json"
     }
 
-    data = {
-        "to": LINE_USER_ID,
-        "messages": [{"type": "text", "text": msg}]
-    }
-
     try:
         res = requests.post(url, headers=headers, json=data)
-        print("📨 LINE:", res.status_code)
+        print("📨 LINE:", res.status_code, res.text)
     except Exception as e:
         print("❌ LINE error:", e)
 
 
-# =========================
-# 🟠 Shopee
-# =========================
+# ===== Shopee 爬蟲（API版）=====
 def fetch_shopee():
     print("🟠 Shopee")
-
-    url = "https://shopee.tw/api/v4/search/search_items"
-    params = {
-        "keyword": "sony mdr z1r",
-        "limit": 5
-    }
-
-    headers = {"User-Agent": "Mozilla/5.0"}
-
     items = []
 
     try:
-        res = requests.get(url, params=params, headers=headers, timeout=10)
+        url = "https://shopee.tw/api/v4/search/search_items"
+        params = {
+            "by": "relevancy",
+            "keyword": "MDR-Z1R",
+            "limit": 5,
+            "newest": 0,
+            "order": "asc"
+        }
+
+        res = requests.get(url, params=params)
         data = res.json()
 
-        for item in data.get("items", []):
-            info = item.get("item_basic", {})
-            price = int(info.get("price", 0) / 100000)
+        for i in data.get("items", []):
+            item = i["item_basic"]
+            price = item["price"] // 100000
 
             items.append({
-                "id": f"shopee-{info.get('itemid')}",
-                "title": info.get("name"),
+                "id": f"shopee-{item['itemid']}",
+                "title": item["name"],
                 "price": price,
-                "url": f"https://shopee.tw/product/{info.get('shopid')}/{info.get('itemid')}"
+                "url": f"https://shopee.tw/product/{item['shopid']}/{item['itemid']}"
             })
 
     except Exception as e:
@@ -83,29 +87,25 @@ def fetch_shopee():
     return items
 
 
-# =========================
-# 🟡 Yahoo（較不穩）
-# =========================
+# ===== Yahoo 爬蟲 =====
 def fetch_yahoo():
     print("🟡 Yahoo")
-
-    url = "https://tw.buy.yahoo.com/api/v1/search"
-    params = {"p": "sony mdr z1r"}
-
-    headers = {"User-Agent": "Mozilla/5.0"}
-
     items = []
 
     try:
-        res = requests.get(url, params=params, headers=headers, timeout=10)
-        data = res.json()
+        url = "https://tw.search.yahoo.com/search?p=MDR-Z1R"
+        res = requests.get(url)
+        soup = BeautifulSoup(res.text, "html.parser")
 
-        for p in data.get("data", [])[:5]:
+        for a in soup.select("h3 a")[:5]:
+            title = a.get_text()
+            link = a.get("href")
+
             items.append({
-                "id": f"yahoo-{p.get('id')}",
-                "title": p.get("name"),
-                "price": int(p.get("price", 0)),
-                "url": p.get("url")
+                "id": f"yahoo-{hash(title)}",
+                "title": title,
+                "price": 0,
+                "url": link
             })
 
     except Exception as e:
@@ -114,38 +114,25 @@ def fetch_yahoo():
     return items
 
 
-# =========================
-# 🔵 露天（HTML）
-# =========================
+# ===== 露天 爬蟲 =====
 def fetch_ruten():
     print("🔵 Ruten")
-
-    url = "https://www.ruten.com.tw/find/?q=sony+mdr+z1r"
-    headers = {"User-Agent": "Mozilla/5.0"}
-
     items = []
 
     try:
-        res = requests.get(url, headers=headers, timeout=10)
+        url = "https://www.ruten.com.tw/find/?q=MDR-Z1R"
+        res = requests.get(url)
         soup = BeautifulSoup(res.text, "html.parser")
 
-        cards = soup.select(".rt-product-card")[:5]
-
-        for c in cards:
-            title = c.select_one(".rt-product-card-name")
-            price = c.select_one(".rt-product-card-price")
-            link = c.select_one("a")
-
-            if not title or not price or not link:
-                continue
-
-            price_text = price.text.replace(",", "").replace("$", "")
+        for a in soup.select("a.rt-search-product-name")[:5]:
+            title = a.get_text(strip=True)
+            link = a.get("href")
 
             items.append({
-                "id": f"ruten-{link['href']}",
-                "title": title.text.strip(),
-                "price": int(price_text),
-                "url": link["href"]
+                "id": f"ruten-{hash(title)}",
+                "title": title,
+                "price": 0,
+                "url": link
             })
 
     except Exception as e:
@@ -154,26 +141,33 @@ def fetch_ruten():
     return items
 
 
-# =========================
-# 整合
-# =========================
+# ===== 總抓取 =====
 def fetch_all():
     items = []
     items += fetch_shopee()
     items += fetch_yahoo()
     items += fetch_ruten()
 
-    print(f"📦 總數: {len(items)}")
+    if not items:
+        print("⚠️ fallback 測試資料")
+        items = [{
+            "id": "test-sony",
+            "title": "Sony MDR-Z1R",
+            "price": 29000,
+            "url": "https://example.com"
+        }]
+
     return items
 
 
-# =========================
-# 判斷邏輯
-# =========================
+# ===== 判斷邏輯 =====
 COOLDOWN = 60 * 60 * 6
 DROP_RATIO = 0.95
 
 def should_notify(item):
+    if not r:
+        return True
+
     key = f"item:{item['id']}"
     now = int(time.time())
 
@@ -191,14 +185,17 @@ def should_notify(item):
 
 
 def mark_sent(item):
+    if not r:
+        return
+
     key = f"item:{item['id']}"
-    r.set(f"{key}:time", int(time.time()))
+    now = int(time.time())
+
+    r.set(f"{key}:time", now)
     r.set(f"{key}:price", item["price"])
 
 
-# =========================
-# 主任務
-# =========================
+# ===== 主任務 =====
 def job():
     print("🔥 JOB START")
 
@@ -209,14 +206,13 @@ def job():
             print("👉", item["title"], item["price"])
 
             if should_notify(item):
-                msg = f"""🔥 撿到便宜！
+                msg = f"""🔥 好價通知
 💰 {item['price']}
 📝 {item['title']}
 🔗 {item['url']}"""
 
                 send_line(msg)
                 mark_sent(item)
-                print("✅ 發送")
 
     except Exception as e:
         print("❌ JOB ERROR:", e)
@@ -224,39 +220,28 @@ def job():
     print("🏁 JOB END\n")
 
 
-# =========================
-# Scheduler（防爆版）
-# =========================
+# ===== Scheduler（避免重複）=====
 scheduler = BackgroundScheduler()
 
-def start_scheduler():
-    if not scheduler.running:
-        scheduler.add_job(job, "interval", minutes=10)
-        scheduler.start()
-        print("⏰ Scheduler started")
+if os.environ.get("RENDER") or os.environ.get("PYTHONUNBUFFERED"):
+    scheduler.add_job(job, "interval", minutes=10)
+    scheduler.start()
+    print("⏰ Scheduler started")
 
 
-# 👉 關鍵：讓 gunicorn 也會啟動 scheduler（但只跑一次）
-if os.environ.get("RUN_MAIN") != "true":
-    start_scheduler()
-
-
-# =========================
-# API
-# =========================
+# ===== API =====
 @app.route("/")
 def home():
     return "running"
 
+
 @app.route("/test")
 def test():
-    send_line("🧪 測試成功")
-    return "ok"
+    send_line("✅ 測試成功")
+    return "sent"
 
 
-# =========================
-# 本地啟動
-# =========================
+# ===== 本地用 =====
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))
     app.run(host="0.0.0.0", port=port)
