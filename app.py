@@ -10,6 +10,7 @@ app = Flask(__name__)
 # ===== 環境變數 =====
 REDIS_URL = os.environ.get("REDIS_URL")
 LINE_TOKEN = os.environ.get("LINE_TOKEN")
+LINE_USER_ID = os.environ.get("LINE_USER_ID")
 
 if not REDIS_URL:
     raise Exception("❌ REDIS_URL 沒設定")
@@ -17,20 +18,26 @@ if not REDIS_URL:
 if not LINE_TOKEN:
     raise Exception("❌ LINE_TOKEN 沒設定")
 
+if not LINE_USER_ID:
+    raise Exception("❌ LINE_USER_ID 沒設定")
+
 # ===== Redis =====
 r = redis.from_url(
     REDIS_URL,
     decode_responses=True
 )
 
-# ===== LINE 推播 =====
+# ===== LINE 推播（改用 push，100%可測）=====
 def send_line(msg):
-    url = "https://api.line.me/v2/bot/message/broadcast"
+    url = "https://api.line.me/v2/bot/message/push"
+
     headers = {
         "Authorization": f"Bearer {LINE_TOKEN}",
         "Content-Type": "application/json"
     }
+
     data = {
+        "to": LINE_USER_ID,
         "messages": [{"type": "text", "text": msg}]
     }
 
@@ -41,7 +48,7 @@ def send_line(msg):
         print("❌ LINE 發送錯誤:", e)
 
 
-# ===== 爬蟲（先用假資料）=====
+# ===== 爬蟲（測試用假資料）=====
 def fetch_all():
     print("⚠️ 使用 fallback 測試資料")
     return [{
@@ -53,7 +60,7 @@ def fetch_all():
 
 
 # ===== 判斷邏輯 =====
-COOLDOWN = 60 * 60 * 6
+COOLDOWN = 0          # 🔥 測試先關掉冷卻
 DROP_RATIO = 0.95
 
 def should_notify(item):
@@ -117,6 +124,13 @@ if os.environ.get("RUN_MAIN") == "true" or os.environ.get("WERKZEUG_RUN_MAIN") =
     scheduler = BackgroundScheduler()
     scheduler.add_job(job, "interval", minutes=10)
     scheduler.start()
+
+
+# ===== 手動測試（重點🔥）=====
+@app.route("/test")
+def test():
+    job()
+    return "✅ job triggered"
 
 
 # ===== API =====
