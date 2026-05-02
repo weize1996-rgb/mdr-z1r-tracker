@@ -2,19 +2,36 @@ import requests
 
 def search_shopee():
     url = "https://shopee.tw/api/v4/search/search_items"
-    params = {"keyword": "sony mdr z1r", "limit": 20}
 
-    r = requests.get(url, params=params).json()
+    params = {
+        "by": "relevancy",
+        "keyword": "sony mdr z1r",
+        "limit": 20,
+        "newest": 0,
+        "order": "desc",
+        "page_type": "search"
+    }
+
+    headers = {
+        "User-Agent": "Mozilla/5.0",
+        "Accept": "application/json"
+    }
+
+    r = requests.get(url, params=params, headers=headers)
+    data = r.json()
 
     items = []
-    for i in r.get("items", []):
-        b = i["item_basic"]
+
+    for i in data.get("items", []):
+        item = i["item_basic"]
+
+        price = item["price"] / 100000  # 蝦皮單位
 
         items.append({
-            "id": f"shopee_{b['itemid']}",
-            "title": b["name"],
-            "price": b["price"]/100000,
-            "url": f"https://shopee.tw/product/{b['shopid']}/{b['itemid']}"
+            "id": str(item["itemid"]),
+            "title": item["name"],
+            "price": int(price),
+            "url": f"https://shopee.tw/product/{item['shopid']}/{item['itemid']}"
         })
 
     return items
