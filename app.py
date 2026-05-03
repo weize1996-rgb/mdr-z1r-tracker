@@ -3,7 +3,6 @@ import requests
 import redis
 import os
 from apscheduler.schedulers.background import BackgroundScheduler
-from bs4 import BeautifulSoup
 import re
 import random
 
@@ -16,45 +15,35 @@ LINE_USER_ID = os.environ.get("LINE_USER_ID")
 
 if not REDIS_URL:
     raise Exception("❌ REDIS_URL 沒設定")
-
 if not LINE_TOKEN:
     raise Exception("❌ LINE_TOKEN 沒設定")
 
-if not LINE_USER_ID:
-    raise Exception("❌ LINE_USER_ID 沒設定")
-
 r = redis.from_url(REDIS_URL, decode_responses=True)
 
+# ===== 關鍵字 =====
 KEYWORDS = ["MDR-Z1R", "Sony Z1R"]
-
-# ===== headers（防擋）=====
-HEADERS = {
-    "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X)"
-}
 
 # ===== LINE =====
 def send_line(msg):
+    if not LINE_USER_ID:
+        print("⚠️ 沒設定 LINE_USER_ID")
+        return
+
     url = "https://api.line.me/v2/bot/message/push"
     headers = {
         "Authorization": f"Bearer {LINE_TOKEN}",
         "Content-Type": "application/json"
     }
-
     data = {
         "to": LINE_USER_ID,
         "messages": [{"type": "text", "text": msg}]
     }
 
-    try:
-        res = requests.post(url, headers=headers, json=data, timeout=10)
-        print("📨 LINE:", res.status_code)
-    except Exception as e:
-        print("❌ LINE錯誤:", e)
+    res = requests.post(url, headers=headers, json=data)
+    print("📨 LINE:", res.status_code, res.text)
 
 # ===== 工具 =====
 def parse_price(text):
-    if not text:
-        return None
     text = re.sub(r"[^\d]", "", text)
     return int(text) if text else None
 
@@ -63,19 +52,23 @@ def fetch_shopee(keyword):
     print("🟠 Shopee:", keyword)
 
     url = "https://shopee.tw/api/v4/search/search_items"
+    headers = {
+        "User-Agent": "Mozilla/5.0",
+        "Accept": "application/json"
+    }
 
     params = {
         "keyword": keyword,
         "limit": 20,
-        "newest": random.randint(0, 1000)
+        "newest": 0,
+        "order": "asc"
     }
 
     try:
-        res = requests.get(url, headers=HEADERS, params=params, timeout=10)
+        res = requests.get(url, headers=headers, params=params, timeout=10)
         data = res.json()
 
         items = []
-
         for i in data.get("items", []):
             item = i.get("item_basic", {})
             price = item.get("price_min", 0) / 100000
@@ -90,51 +83,22 @@ def fetch_shopee(keyword):
                 "url": f"https://shopee.tw/product/{item.get('shopid')}/{item.get('itemid')}"
             })
 
-        print("Shopee:", len(items))
+        print("Shopee items:", len(items))
         return items
 
     except Exception as e:
-        print("Shopee error:", e)
+        print("❌ Shopee error:", e)
         return []
 
-# ===== 露天（簡化穩定版）=====
-def fetch_ruten(keyword):
-    print("🔵 Ruten:", keyword)
-
-    url = f"https://www.ruten.com.tw/find/?q={keyword}"
-
-    try:
-        res = requests.get(url, headers=HEADERS, timeout=10)
-        soup = BeautifulSoup(res.text, "html.parser")
-
-        items = []
-
-        for tag in soup.find_all(text=re.compile(r"\$\d+"))[:20]:
-            price = parse_price(tag)
-
-            if price and 1000 < price < 200000:
-                items.append({
-                    "id": f"ruten-{hash(tag)}",
-                    "title": tag.strip()[:30],
-                    "price": price,
-                    "url": url
-                })
-
-        print("Ruten:", len(items))
-        return items[:5]
-
-    except Exception as e:
-        print("Ruten error:", e)
-        return []
-
-# ===== fallback =====
+# ===== fallback（保證有資料）=====
 def fallback_items():
-    print("⚠️ fallback")
+    print("⚠️ 使用 fallback")
+
     return [{
-        "id": "fallback",
+        "id": "fallback-1",
         "title": "Sony MDR-Z1R (fallback)",
-        "price": 50000,
-        "url": "https://example.com"
+        "price": random.randint(30000, 50000),
+        "url": "https://shopee.tw"
     }]
 
 # ===== 聚合 =====
@@ -143,24 +107,24 @@ def fetch_all():
 
     for kw in KEYWORDS:
         all_items += fetch_shopee(kw)
-        all_items += fetch_ruten(kw)
 
     if not all_items:
         all_items = fallback_items()
 
-    print("📦 總數:", len(all_items))
+    print("📦 總商品數:", len(all_items))
     return all_items
 
 # ===== 比價 =====
-def get_best(items):
+def get_best_price(items):
     return min(items, key=lambda x: x["price"])
 
-# ===== 通知邏輯 =====
+# ===== 通知 =====
 def should_notify(item):
-    last = r.get("best_price")
+    key = f"best_price"
+    last = r.get(key)
 
     if last:
-        if int(last) <= item["price"]:
+        if item["price"] >= int(last):
             return False
 
     return True
@@ -170,41 +134,43 @@ def save_price(item):
 
 # ===== 任務 =====
 def job():
-    print("🔥 START")
+    print("\n🔥 JOB START")
 
     items = fetch_all()
-    best = get_best(items)
+    best = get_best_price(items)
 
-    print("🏆", best)
+    print("🏆 最低價:", best)
 
-    if should_notify(best):
-        msg = f"""🔥 最低價！
+    msg = f"""🔥 比價更新
 💰 {best['price']}
 📝 {best['title']}
 🔗 {best['url']}"""
 
-        send_line(msg)
+    # 強制送（debug用）
+    send_line(msg)
+
+    if should_notify(best):
         save_price(best)
-        print("✅ 已通知")
+        print("✅ 新低價")
     else:
-        print("💤 無變化")
+        print("💤 價格沒變")
 
-    print("🏁 END\n")
+    print("🏁 JOB END\n")
 
-# ===== 排程 =====
+# ===== Scheduler =====
 scheduler = BackgroundScheduler()
 scheduler.add_job(job, "interval", minutes=10)
 scheduler.start()
 
 # ===== API =====
-@app.route("/")
-def home():
-    return "running"
-
 @app.route("/test")
 def test():
     job()
     return "OK"
+
+@app.route("/")
+def home():
+    return "running"
 
 # ===== 啟動 =====
 if __name__ == "__main__":
