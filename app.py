@@ -1,6 +1,5 @@
 from flask import Flask
 import requests
-import time
 import redis
 import os
 from apscheduler.schedulers.background import BackgroundScheduler
@@ -20,28 +19,17 @@ if not REDIS_URL:
 if not LINE_TOKEN:
     raise Exception("❌ LINE_TOKEN 沒設定")
 
-# USER_ID 可以不強制（避免你又炸）
-# if not LINE_USER_ID:
-#     raise Exception("❌ LINE_USER_ID 沒設定")
-
-# ===== Redis =====
 r = redis.from_url(REDIS_URL, decode_responses=True)
 
-# ===== 搜尋關鍵字 =====
-KEYWORDS = [
-    "MDR-Z1R",
-    "Sony Z1R"
-]
+KEYWORDS = ["MDR-Z1R", "Sony Z1R"]
 
 # ===== LINE =====
 def send_line(msg):
     url = "https://api.line.me/v2/bot/message/push"
-
     headers = {
         "Authorization": f"Bearer {LINE_TOKEN}",
         "Content-Type": "application/json"
     }
-
     data = {
         "to": LINE_USER_ID,
         "messages": [{"type": "text", "text": msg}]
@@ -60,11 +48,17 @@ def parse_price(text):
     text = re.sub(r"[^\d]", "", text)
     return int(text) if text else None
 
-# ===== Shopee =====
+# ===== Shopee（加強版）=====
 def fetch_shopee(keyword):
     print("🟠 Shopee:", keyword)
 
     url = "https://shopee.tw/api/v4/search/search_items"
+
+    headers = {
+        "User-Agent": "Mozilla/5.0",
+        "Accept": "application/json"
+    }
+
     params = {
         "keyword": keyword,
         "limit": 10,
@@ -73,7 +67,7 @@ def fetch_shopee(keyword):
     }
 
     try:
-        res = requests.get(url, params=params)
+        res = requests.get(url, headers=headers, params=params, timeout=10)
         data = res.json()
 
         items = []
@@ -81,80 +75,31 @@ def fetch_shopee(keyword):
             item = i.get("item_basic", {})
             price = item.get("price_min", 0) / 100000
 
-            items.append({
-                "id": f"shopee-{item.get('itemid')}",
-                "title": item.get("name"),
-                "price": int(price),
-                "url": f"https://shopee.tw/product/{item.get('shopid')}/{item.get('itemid')}"
-            })
+            if price > 0:
+                items.append({
+                    "id": f"shopee-{item.get('itemid')}",
+                    "title": item.get("name"),
+                    "price": int(price),
+                    "url": f"https://shopee.tw/product/{item.get('shopid')}/{item.get('itemid')}"
+                })
 
+        print("Shopee items:", len(items))
         return items
 
     except Exception as e:
         print("Shopee error:", e)
         return []
 
-# ===== Yahoo =====
-def fetch_yahoo(keyword):
-    print("🟡 Yahoo:", keyword)
+# ===== fallback（保底資料）=====
+def fallback_items():
+    print("⚠️ 使用 fallback")
 
-    url = f"https://tw.search.yahoo.com/search?p={keyword}"
-    headers = {"User-Agent": "Mozilla/5.0"}
-
-    try:
-        res = requests.get(url, headers=headers)
-        soup = BeautifulSoup(res.text, "html.parser")
-
-        items = []
-        for div in soup.select("div")[:20]:
-            text = div.get_text()
-
-            if "NT$" in text:
-                price = parse_price(text)
-                if price:
-                    items.append({
-                        "id": f"yahoo-{hash(text)}",
-                        "title": text[:50],
-                        "price": price,
-                        "url": url
-                    })
-
-        return items[:5]
-
-    except Exception as e:
-        print("Yahoo error:", e)
-        return []
-
-# ===== 露天 =====
-def fetch_ruten(keyword):
-    print("🔵 Ruten:", keyword)
-
-    url = f"https://www.ruten.com.tw/find/?q={keyword}"
-    headers = {"User-Agent": "Mozilla/5.0"}
-
-    try:
-        res = requests.get(url, headers=headers)
-        soup = BeautifulSoup(res.text, "html.parser")
-
-        items = []
-        for a in soup.select("a")[:20]:
-            text = a.get_text()
-
-            if "$" in text:
-                price = parse_price(text)
-                if price:
-                    items.append({
-                        "id": f"ruten-{hash(text)}",
-                        "title": text[:50],
-                        "price": price,
-                        "url": a.get("href")
-                    })
-
-        return items[:5]
-
-    except Exception as e:
-        print("Ruten error:", e)
-        return []
+    return [{
+        "id": "fallback-1",
+        "title": "Sony MDR-Z1R (fallback)",
+        "price": 50000,
+        "url": "https://example.com"
+    }]
 
 # ===== 聚合 =====
 def fetch_all():
@@ -162,49 +107,41 @@ def fetch_all():
 
     for kw in KEYWORDS:
         all_items += fetch_shopee(kw)
-        all_items += fetch_yahoo(kw)
-        all_items += fetch_ruten(kw)
 
+    if not all_items:
+        all_items = fallback_items()
+
+    print("📦 總商品數:", len(all_items))
     return all_items
 
-# ===== 比價核心 =====
+# ===== 比價 =====
 def get_best_price(items):
-    if not items:
-        return None
     return min(items, key=lambda x: x["price"])
 
-# ===== 通知邏輯 =====
+# ===== 通知 =====
 def should_notify(item):
-    key = f"best:{item['title']}"
-    last_price = r.get(key)
+    key = "best_price"
+    last = r.get(key)
 
-    if last_price:
-        last_price = int(last_price)
-        if item["price"] >= last_price:
-            return False
+    if last and int(last) <= item["price"]:
+        return False
 
     return True
 
 def mark_price(item):
-    key = f"best:{item['title']}"
-    r.set(key, item["price"])
+    r.set("best_price", item["price"])
 
-# ===== 主任務 =====
+# ===== 任務 =====
 def job():
     print("🔥 JOB START")
 
     items = fetch_all()
-
     best = get_best_price(items)
-
-    if not best:
-        print("❌ 沒抓到")
-        return
 
     print("🏆 最低價:", best)
 
     if should_notify(best):
-        msg = f"""🔥 最低價出現！
+        msg = f"""🔥 最低價
 💰 {best['price']}
 📝 {best['title']}
 🔗 {best['url']}"""
@@ -213,7 +150,7 @@ def job():
         mark_price(best)
         print("✅ 已通知")
     else:
-        print("💤 價格沒變")
+        print("💤 無變化")
 
     print("🏁 JOB END\n")
 
@@ -221,15 +158,13 @@ def job():
 scheduler = BackgroundScheduler()
 scheduler.add_job(job, "interval", minutes=10)
 scheduler.start()
-print("⏰ Scheduler started")
 
-# ===== 測試 API =====
+# ===== API =====
 @app.route("/test")
 def test():
     job()
     return "OK"
 
-# ===== 首頁 =====
 @app.route("/")
 def home():
     return "running"
