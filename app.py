@@ -1,3 +1,4 @@
+print("🔥 VERSION: SHOPEE_V2")
 import os
 import requests
 from flask import Flask
